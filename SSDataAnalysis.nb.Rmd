@@ -1,0 +1,395 @@
+---
+title: "Read Data, Cluster and make UMAP"
+---
+
+```{r,message=FALSE,warning=FALSE}
+library(CATALYST)
+library(flowCore)
+library(cowplot)
+# library('tidyverse')
+# library(diffcyt)
+# library(scater)
+# library(SingleCellExperiment)
+# library(dplyr)
+
+pathtosamples <- ""
+FileNames = as.data.frame(list.files(path=pathtosamples,pattern='.fcs',full.names=TRUE)) #SEG)
+fcs <- FileNames$`list.files(path = pathtosamples, pattern = ".fcs", full.names = TRUE)`
+colnames(FileNames) <- "filenames"
+frame=read.FCS(FileNames$filenames[1]) # Read the first file to look at the channel names
+#write.csv2(x = pData(parameters(frame))[,2], file = "panelbigdataset.csv") # Have a look at all the channels names and numbers
+
+FuncInds <- c(22,	25,	26,	27,	29,	31,	33,	39,	45,	68) # Choose the  functional markers
+ToUse <- c(10,	11,	12,	13,	14,	20,	28,	30,	32,	35,	42,	43,	44,	54, 59,	62,	64,	67,	69,	71) # Choose the clustering/dimentionality reduction channels
+
+pData(parameters(frame))[,2][FuncInds] # Check your selection of functional markers
+pData(parameters(frame))[,2][ToUse] # Check your selection of  markers for clustering/dimensionality reduction
+
+# Make the panel
+signaling <- pData(parameters(frame))[FuncInds,1:3]
+signaling$range <- "state" 
+phenotyping <- pData(parameters(frame))[ToUse,1:3]
+phenotyping$range <- "type" 
+panel <- rbind(signaling, phenotyping)
+rownames(panel) <- NULL
+colnames(panel) <- c("fcs_colname", "antigen","marker_class")
+panel
+
+# Read meta from file. Columnames: filename (FULL path), file_name, patient_id, condition, class
+meta <- read.csv("Bigdata_PBPS.csv")
+meta$filename <- gsub("mmasg", "stein-erikgullaksen", meta$filename)
+meta$sample_id <- sample_id <- paste0(meta$condition, "_",meta$patient_id)
+meta
+```
+
+### Read inn the data using the panel and metadata
+```{r, message=FALSE,warning=FALSE}
+# Subsampling 
+set.seed(0) # Being reproducible is a plus
+sampling.ceiling <- 100000
+
+fullframe <- read.flowSet(meta$filename, transformation = FALSE, truncate_max_range = FALSE)
+fsApply(fullframe, nrow)
+fs.ds <- fsApply(fullframe, function(ff) {
+  idx <- sample.int(nrow(ff), min(sampling.ceiling, nrow(ff)))
+  ff[idx,]  # alt. ff[order(idx),]
+})
+fsApply (fs.ds, nrow)
+
+sce = prepData(fs.ds, panel, meta, md_cols = list(factors = c("sample_id", "condition", "patient_id")))
+sce
+fs.ds <- NULL
+fullframe <- NULL
+```
+
+### Show the number of cells in each sample
+```{r}
+plotCounts(sce, 
+    group_by = "sample_id", 
+    color_by = "condition")
+```
+
+### Use FlowSOM to cluster data:/
+```{r}
+## FlowSOM
+ptm <- proc.time()
+sce <- cluster(sce, features = "type",
+               xdim = 10, ydim = 10, maxK = 30,
+               verbose = FALSE, seed = 1)
+proc.time() - ptm
+
+# UMAP
+ptm <- proc.time()
+set.seed(1601)
+sce <- runDR(sce, dr = "UMAP", cells = 8964, features = "type") # cells is per sample!
+proc.time() - ptm # How long does it take? Elapsed is in seconds
+
+# Save the data for late use
+saveRDS(sce, file ="sceEdanPBPS_Spike.RData")
+```
+
+### If you are reading the SCE from Rdata
+```{r}
+#sce <- readRDS("sceEdanPBPS_Spike.RData")
+```
+
+```{r}
+# Keywords for making file names for later that is understandable
+# keyword <- c("all_noLC") # what selection on markers were used for clustering/dimensionality reduction?
+
+testparams <- c("meta15", "meta20", "meta25", "meta30")
+
+p <- plotDR(sce, color_by = type_markers(sce))
+p$facet$params$ncol <- 4
+p <- p+theme_cowplot()
+ggsave(filename = paste0("TypemarkersUMAP", ".jpeg",sep=""),
+       width = 14,
+       height = 11)
+p
+
+for (i in 1:length(testparams)){
+  print(testparams[i])
+  # Cluster UMAP
+  p <- plotDR(sce, color_by = testparams[i])
+  p <- p+theme_cowplot()
+  ggsave(filename = paste0("clusterUMAP",testparams[i], ".jpeg",sep=""),
+       p, width = 320,
+       height = 300,
+       units = "mm")
+
+  # Heatmaps
+  p <- plotExprHeatmap(sce, features = "type",
+    by = "cluster_id", k = testparams[i],
+    scale = "last", q = 0.01,bars = TRUE, perc = TRUE, col_dend = TRUE)
+  p@matrix_param[["gp"]][["col"]] <- NA
+  name <- paste0("heatmap_last_",testparams[i], ".pdf",sep="")
+  
+  pdf(file = name)
+  print(p)
+  dev.off()
+
+  p <- plotExprHeatmap(sce, features = "type",
+    by = "cluster_id", k = testparams[i],
+    scale = "never",hm_pal = hcl.colors(10, "Inferno"), bars = TRUE, perc = TRUE, col_dend = TRUE)
+  p@matrix_param[["gp"]][["col"]] <- NA
+  p@matrix_color_mapping@levels <- c(0,1,2,3,4)
+  name <- paste0("heatmap_first_",testparams[i], ".pdf",sep="")
+  
+  pdf(file = name)
+  print(p)
+  dev.off()
+  
+  u <- sce
+  design <- createDesignMatrix(ei(u), cols_design = "condition")
+  contrast <- createContrast(c(0, 1))
+  res_DA <- NULL
+  tbl_DA<- NULL
+
+  res_DS <- diffcyt(u, 
+                  clustering_to_use = testparams[i],
+                  analysis_type = "DS", 
+                  method_DS = "diffcyt-DS-limma",
+                  design = design, 
+                  contrast = contrast, 
+                  verbose = FALSE)
+tbl_DS <- rowData(res_DS$res)
+nosign <- length(tbl_DS$ID[tbl_DS$p_adj<=0.1])
+
+p <- plotDiffHeatmap(u, tbl_DS, all = TRUE, top_n = 12, fdr = 0.1, 
+    sort_by = "padj", col_anno = "condition", normalize =TRUE)
+  
+  
+  
+  name <- paste0("Signal_limma",testparams[i], ".pdf",sep="")
+  pdf(file = name)
+  print(p)
+  dev.off()
+}
+
+```
+
+### Cluster annotation and merging. Do this after the plotting below. 
+```{r}
+# Print out the medians for each cluster
+p <- plotExprHeatmap(sce, features = "type",
+    by = "cluster_id", k = "meta15",
+    scale ="never", q = 0.01,bars = TRUE, perc = TRUE, col_dend = TRUE)
+write.csv(as.data.frame(p@matrix), file = paste0("heatmap_noscaled", ".csv",sep=""))
+
+# Key to merge and annotate
+cluster_merge <- read.csv("merging_table.csv") # Needs exactly columnames : old_cluster and new_cluster
+head(cluster_merge)
+sce <- mergeClusters(sce, k = "meta15", table = cluster_merge, id = "merged", overwrite = TRUE)
+head(cluster_codes(sce))
+
+# Save the annotated data for late use
+saveRDS(sce, file ="EdanAnnotatedPBPS.RData")
+```
+
+
+# Evaluate the proportions of cell types in patient samples
+```{r}
+testparams <- c("merged")
+
+p <- plotDR(sce, color_by = testparams)
+p <- p+theme_cowplot()
+ggsave(filename = paste0("annotated_clusterUMAP",testparams, ".pdf",sep=""), device = "pdf",
+       p, width = 10,
+       height = 7)
+
+p <- plotDR(sce, color_by = testparams, facet_by = "patient_id")
+p <- p+theme_cowplot()
+ggsave(filename = paste0("annotated_clusterPatUMAP",testparams, ".pdf",sep=""), device = "pdf",p, width = 12, height = 7)
+
+p <- plotDR(sce, color_by = testparams, facet_by = "condition")
+p <- p+theme_cowplot()
+ggsave(filename = paste0("annotated_clusterConUMAP",testparams, ".pdf",sep=""), device = "pdf",p, width = 10, height = 4)
+
+# Heatmaps
+p <- plotExprHeatmap(sce, features = "type",
+                     by = "cluster_id", k = testparams,
+                     scale = "last", q = 0.01,bars = TRUE, perc = TRUE, col_dend = TRUE)
+p@matrix_param[["gp"]][["col"]] <- NA
+name <- paste0("annotated_heatmap_last_",testparams, ".pdf",sep="")
+  
+pdf(file = name, width = 8, height = 5)
+print(p)
+dev.off()
+
+p <- plotExprHeatmap(sce, features = "type",
+                     by = "cluster_id", k = testparams,
+                     scale = "never",hm_pal = hcl.colors(10, "Inferno"), 
+                     bars = TRUE, perc = TRUE, col_dend = TRUE)
+p@matrix_param[["gp"]][["col"]] <- NA
+p@matrix_color_mapping@levels <- c(0,1,2,3,4)
+name <- paste0("annotated_heatmap_never_",testparams, ".pdf",sep="")
+  
+pdf(file = name,width = 8, height = 5)
+print(p)
+dev.off()
+
+  
+p <- plotAbundances(sce, k = testparams, by = "sample_id", group_by = "patient_id", )
+ggsave(p,filename = paste0("annotated_columnplot",testparams, ".pdf",sep=""), device = "pdf",
+       width = 4,
+       height = 8)
+
+```
+
+### Abundance and State difference testing
+```{r}
+u <- sce
+testparams <- "merged"
+
+unique(u$condition)
+
+# create design & constrast matrix
+design <- createDesignMatrix(ei(u), cols_design = "condition")
+contrast <- createContrast(c(0, 1))
+
+# Test for differential abundance (DA) of clusters and differential states (DS) within clusters
+res_DA <- diffcyt(u, 
+                  clustering_to_use = testparams,
+                  analysis_type = "DA", 
+                  method_DA = "diffcyt-DA-edgeR",
+                  design = design, 
+                  contrast = contrast, 
+                  verbose = FALSE)
+tbl_DA <- rowData(res_DA$res)
+
+pdf(file = paste0("Abund_edgeR",testparams, ".pdf",sep=""),
+    width = 11.7, # The width of the plot in inches
+    height = 16.5)
+plotDiffHeatmap(u, tbl_DA, all = TRUE, fdr = 0.1, 
+    sort_by = "lfc", col_anno = "condition", normalize =TRUE)
+dev.off()
+
+plotDiffHeatmap(u, tbl_DA,all = TRUE, fdr = 0.1, 
+    sort_by = "lfc", col_anno = "condition", normalize =TRUE)
+
+res_DA <- NULL
+tbl_DA<- NULL
+
+res_DA <- diffcyt(u, 
+                  clustering_to_use = testparams,
+                  analysis_type = "DA", 
+                  method_DA = "diffcyt-DA-voom",
+                  design = design, 
+                  contrast = contrast, 
+                  verbose = FALSE)
+tbl_DA <- rowData(res_DA$res)
+
+pdf(file = paste0("Abund_Voom",testparams, ".pdf",sep=""),
+   width = 11.7, # The width of the plot in inches
+    height = 16.5)
+plotDiffHeatmap(u, tbl_DA,all = TRUE, fdr = 0.1, 
+    sort_by = "lfc", col_anno = "condition", normalize =TRUE)
+dev.off()
+
+plotDiffHeatmap(u, tbl_DA,all = TRUE, fdr = 0.1, 
+    sort_by = "lfc", col_anno = "condition", normalize =TRUE)
+
+res_DA <- NULL
+tbl_DA<- NULL
+
+res_DS <- diffcyt(u, 
+                  clustering_to_use = testparams,
+                  analysis_type = "DS", 
+                  method_DS = "diffcyt-DS-limma",
+                  design = design, 
+                  contrast = contrast, 
+                  verbose = FALSE)
+tbl_DS <- rowData(res_DS$res)
+nosign <- length(tbl_DS$ID[tbl_DS$p_adj<=0.1])
+
+pdf(file = paste0("Signal_limma",testparams, ".pdf",sep=""),
+    width = 11, # The width of the plot in inches
+    height = 8)
+plotDiffHeatmap(u, tbl_DS, all = TRUE, top_n = 12, fdr = 0.1, 
+    sort_by = "padj", col_anno = "condition", normalize =TRUE)
+dev.off()
+
+plotDiffHeatmap(u, tbl_DS, all = TRUE, top_n = 12, fdr = 0.1, 
+    sort_by = "padj", col_anno = "condition", normalize =TRUE)
+
+```
+
+### Get data on each cluster in each sample
+```{r}
+metaclust <- testparams
+# Get 90th percentile values for all channels 
+scdf <- data.frame(t(assay(sce, "exprs")[state_markers(sce), ]), 
+                   sample_id = sce$sample_id, 
+                   cluster_id = (dplyr::select(cluster_codes(sce), metaclust))[sce$cluster_id,], 
+                   check.names = FALSE)
+
+#scdf[,1:10] <- sinh(scdf[,1:10])*5 # detransform the data
+
+percentiles <- function(dat) {
+  ninetiethperc <- stack(lapply(dat, quantile, prob = 0.9, names = FALSE)) #prob = percentile
+  return(ninetiethperc)
+}
+
+df <- group_by(scdf, sample_id, cluster_id) %>% nest()
+df <- df %>% 
+  mutate(resultat = map(data, percentiles))
+
+ClusterData <- unnest(df, resultat)
+ClusterData$data <- NULL
+colnames(ClusterData) <- c("sample_id","cluster_id","value","variable")
+
+# Get percent cluster frequencies 
+n_cells <- table(sce$sample_id, cluster_ids(sce, k = metaclust))
+props <- as.data.frame(prop.table(n_cells, margin = 1))
+props$variable <- "PercentFreq"
+colnames(props) <- c("sample_id","cluster_id","value","variable")
+
+# Rbind together into a single frame, and add some variables
+ClusterData <- rbind(ClusterData,props)
+ClusterData$sample_id <- as.character(ClusterData$sample_id)
+
+#s <- ClusterData$sample_id[7599]
+#"time"       "trial"      "staining"   "patient" 
+
+get_pat <- function(s) {
+  pat <-  strsplit(s, "_")[[1]][3]
+  return(pat)
+}
+
+get_con <- function(s) {
+  con <-  paste0(strsplit(s, "_")[[1]][1], "_", strsplit(s, "_")[[1]][2])
+  return(con)
+}
+
+ClusterData <- ClusterData %>% rowwise() %>% mutate(patient = get_pat(sample_id), 
+                                                    condition = get_con(sample_id))
+
+colnames(ClusterData) <- c("sample_id", "population", "DC_80th", "protein", "patient", "condition")
+write_csv(ClusterData, file = paste0("Clusterdata",metaclust, ".csv",sep=""))
+```
+
+## Make some nice plots of the patient data
+```{r}
+colnames(ClusterData)
+#ClusterData2 <- ClusterData %>% filter((population == "02_ImmNeu"))
+
+testparams <- unique(ClusterData$protein)
+
+for (i in 1:length(testparams)){
+  print(testparams[i])
+  ClusterData2 <- ClusterData %>% filter((protein == testparams[i]))
+  
+  p <- ggplot(ClusterData2, aes(x = condition, y = DC_80th, color = patient)) +
+  geom_point(size = 3) +
+  geom_line(aes(group = patient),size=1.5) +
+  facet_wrap(~ population)
+  p <- p+theme_cowplot()
+  
+  ggsave(p, filename = paste0("raw_data90th", testparams[i], ".pdf"),
+       width = 297,
+       height = 420, 
+       units = "mm")
+}
+```
+
+
