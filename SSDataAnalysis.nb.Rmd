@@ -1,4 +1,4 @@
-----
+---
 title: "Friday meeting single cell analysis"
 ---
 
@@ -9,6 +9,8 @@ library(cowplot)
 library(ggplot2)
 library(dplyr)
 library(diffcyt)
+library(tidyverse)
+library(ggridges)
 ```
 
 
@@ -320,7 +322,8 @@ plotDiffHeatmap(u, tbl_DS, all = TRUE, top_n = 12, fdr = 0.1,
 ### Get data on each cluster in each sample
 ```{r}
 metaclust <- testparams
-# Get 90th percentile values for all channels 
+
+# Get percentile values for all channels 
 scdf <- data.frame(t(assay(sce, "exprs")[state_markers(sce), ]), 
                    sample_id = sce$sample_id, 
                    cluster_id = (dplyr::select(cluster_codes(sce), metaclust))[sce$cluster_id,], 
@@ -329,7 +332,7 @@ scdf <- data.frame(t(assay(sce, "exprs")[state_markers(sce), ]),
 #scdf[,1:10] <- sinh(scdf[,1:10])*5 # detransform the data
 
 percentiles <- function(dat) {
-  ninetiethperc <- stack(lapply(dat, quantile, prob = 0.9, names = FALSE)) #prob = percentile
+  ninetiethperc <- stack(lapply(dat, quantile, prob = 0.75, names = FALSE)) #prob = percentile
   return(ninetiethperc)
 }
 
@@ -351,23 +354,23 @@ colnames(props) <- c("sample_id","cluster_id","value","variable")
 ClusterData <- rbind(ClusterData,props)
 ClusterData$sample_id <- as.character(ClusterData$sample_id)
 
-#s <- ClusterData$sample_id[7599]
+s <- ClusterData$sample_id[1]
 #"time"       "trial"      "staining"   "patient" 
 
-get_pat <- function(s) {
-  pat <-  strsplit(s, "_")[[1]][3]
-  return(pat)
+get_Stim <- function(s) {
+  get_Stim <-  strsplit(s, "_")[[1]][1]
+  return(get_Stim)
 }
 
 get_con <- function(s) {
-  con <-  paste0(strsplit(s, "_")[[1]][1], "_", strsplit(s, "_")[[1]][2])
+  con <-  paste0(strsplit(s, "_")[[1]][2])
   return(con)
 }
 
-ClusterData <- ClusterData %>% rowwise() %>% mutate(patient = get_pat(sample_id), 
+ClusterData <- ClusterData %>% rowwise() %>% mutate(get_Stim = get_Stim(sample_id), 
                                                     condition = get_con(sample_id))
 
-colnames(ClusterData) <- c("sample_id", "population", "DC_80th", "protein", "patient", "condition")
+colnames(ClusterData) <- c("sample_id", "population", "DC_75th", "protein", "Stim", "condition")
 write_csv(ClusterData, file = paste0("Clusterdata",metaclust, ".csv",sep=""))
 ```
 
@@ -375,7 +378,7 @@ write_csv(ClusterData, file = paste0("Clusterdata",metaclust, ".csv",sep=""))
 ## Make some nice plots of the patient data
 ```{r}
 colnames(ClusterData)
-#ClusterData2 <- ClusterData %>% filter((population == "02_ImmNeu"))
+#ClusterData2 <- ClusterData %>% filter((population == "Baso"))  
 
 testparams <- unique(ClusterData$protein)
 
@@ -383,50 +386,46 @@ for (i in 1:length(testparams)){
   print(testparams[i])
   ClusterData2 <- ClusterData %>% filter((protein == testparams[i]))
   
-  p <- ggplot(ClusterData2, aes(x = condition, y = DC_80th, color = patient)) +
+  p <- ggplot(ClusterData2, aes(x = sample_id, y = DC_75th, color = population)) +
   geom_point(size = 3) +
-  geom_line(aes(group = patient),size=1.5) +
+  geom_line(aes(group = population),size=1.5) +
   facet_wrap(~ population)
   p <- p+theme_cowplot()
   
-  ggsave(p, filename = paste0("raw_data90th", testparams[i], ".pdf"),
+  ggsave(p, filename = paste0("raw_data75th", testparams[i], ".pdf"),
        width = 297,
        height = 420, 
        units = "mm")
 }
 ```
 
-#density patient umaps
+### Density patient umaps
 ```{r}
 testparams <- c("merged")
 
-p <- plotDR(sce, color_by = testparams, facet_by = "patient.id", ncol=1)
+p <- plotDR(sce, color_by = testparams, facet_by = "Stim")
 
 q <- p$data
 
 p <- ggplot(q, aes(x, y)) + 
     stat_density_2d(aes(fill=..level..), geom="polygon",bins=8) +
   scale_fill_gradientn(colours = c("black","darkorchid", "darkgoldenrod1"), values = scales::rescale()) + 
-  facet_wrap(q$patient.id, nrow = 1) +
+  facet_wrap(q$sample_id, nrow = 1) +
   theme_cowplot()
 p
 
 ggsave(p, filename = "Densitypatienumap.pdf", device = "pdf",
        width = 20,
        height = 4)
-
-
 ```
 
 
-# Historgam Overlays
+### Historgam Overlays
 ```{r}
-# Historgam Overlays
 u <- filterSCE(sce, k = "merged")
 
 metaclust <- "merged"
 
-# Get 80th percentile values for all channels 
 scdf <- data.frame(t(assay(u, "exprs")[state_markers(u), ]), 
                    sample_id = u$sample_id, 
                    cluster_id = (dplyr::select(cluster_codes(u), metaclust))[u$cluster_id,], 
@@ -435,17 +434,18 @@ scdf$sample_id <- as.character(scdf$sample_id)
 s <- scdf$sample_id[1]
 #"time"       "trial"      "staining"   "patient" 
 
-get_pat <- function(s) {
-  pat <-  paste0(strsplit(s, "_")[[1]][2],"_", strsplit(s, "_")[[1]][1])
-  return(pat)
+get_Stim <- function(s) {
+  get_Stim <-  strsplit(s, "_")[[1]][1]
+  return(get_Stim)
 }
 
 get_con <- function(s) {
-  con <-  strsplit(s, "_")[[1]][1]
+  con <-  paste0(strsplit(s, "_")[[1]][2])
   return(con)
 }
 
-scdf <- scdf %>% rowwise() %>% mutate(patient = get_pat(sample_id), 
+
+scdf <- scdf %>% rowwise() %>% mutate(patient = get_Stim(sample_id), 
                                                     condition = get_con(sample_id))
 
 scdf2 <- rbind(scdf %>% filter((cluster_id == "Monocytes")), scdf %>% filter((cluster_id == "TcEMRA/NKT")))
@@ -459,4 +459,3 @@ e<-ggplot(scdf2, aes(x=`pSTAT1_Y701`, y=`sample_id`, color=`sample_id`, fill = `
 ggsave(e,filename = paste0("PB_IFNa_pSTAT1_Y701.pdf"), width = 7, height = 7)
 
 ```
-
